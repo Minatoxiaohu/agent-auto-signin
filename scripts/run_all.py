@@ -21,6 +21,7 @@ SCRIPTS = {
     "workbuddy": "workbuddy_signin.py",
     "trae": "trae_signin.py",
     "minimax": "minimax_signin.py",
+    "dumate": "dumate_signin.py",
 }
 
 # 这些 result 视为"需要人关注"的失败

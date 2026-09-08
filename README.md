@@ -1,21 +1,21 @@
 # agent-auto-signin
 
-> WorkBuddy / Trae / MiniMax Code 三款 AI 桌面端的每日免费积分自动领取脚本。
-> 纯官方接口实现、零第三方依赖、幂等可重复执行，支持一键接入任意 Agent 自动化流程。
+> WorkBuddy / Trae / MiniMax Code / 百度搭子（DuMate）四款 AI 桌面端的每日免费积分自动领取脚本。
+> 纯官方接口实现、幂等可重复执行，支持一键接入任意 Agent 自动化流程。
 
 ## 项目简介
 
-三个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
+四个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分、百度搭子每日 500 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
 
-> 💡 **项目缘起**：WorkBuddy 端的积分领取方案（凭据定位 + 接口协议）来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的启发，在此致谢；Trae 与 MiniMax Code 端为本项目独立逆向实现。
+> 💡 **项目缘起**：WorkBuddy 端的积分领取方案（凭据定位 + 接口协议）来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的启发，在此致谢；Trae、MiniMax Code 与百度搭子端为本项目独立逆向实现。
 
 **About 建议文案（GitHub 仓库描述）：**
 
 ```
-WorkBuddy / Trae / MiniMax Code 三端每日签到自动领取脚本：纯接口实现、幂等安全、零第三方依赖，支持集成到 WorkBuddy 自动化、任意 Agent Skill 或系统 crontab。
+WorkBuddy / Trae / MiniMax Code / 百度搭子 四端每日签到自动领取脚本：纯接口实现、幂等安全，支持集成到 WorkBuddy 自动化、任意 Agent Skill 或系统 crontab。
 ```
 
-Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `minimax` `python`
+Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `minimax` `dumate` `python`
 
 ## 支持的平台
 
@@ -24,25 +24,28 @@ Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `mini
 | WorkBuddy | 100 积分 | 桌面端写出的明文会话文件 | `{endpoint}/v2/billing/meter/daily-checkin` | `workbuddy_signin.py` |
 | Trae SOLO CN | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
 | MiniMax Code | 400 积分（连签第 4/7 天 1000） | webview localStorage（leveldb）中的 JWT | `agent.minimaxi.com/.../signin/{status,claim}` | `minimax_signin.py` |
+| 百度搭子 DuMate | 500 积分 | `auth.json` 加密 Cookie（AES-256-GCM 本地解密） | `console.bce.baidu.com/api/dumate/points/{loginBonusInfo,loginBonus}` | `dumate_signin.py` |
 
 ## 快速开始
 
 ```bash
-# 三端全部执行（推荐，幂等可重复跑）
+# 四端全部执行（推荐，幂等可重复跑）
 python3 scripts/run_all.py
 
 # 只跑某一端
 python3 scripts/workbuddy_signin.py auto
 python3 scripts/trae_signin.py auto
 python3 scripts/minimax_signin.py auto
+python3 scripts/dumate_signin.py auto
 
 # 调试子命令
 python3 scripts/workbuddy_signin.py status   # 只查状态
 python3 scripts/trae_signin.py status
 python3 scripts/minimax_signin.py status
+python3 scripts/dumate_signin.py status
 ```
 
-环境要求：Python 3.8+（标准库即可）；Trae 解密用到 `openssl` 命令行（macOS/Linux 自带）。
+环境要求：Python 3.8+；Trae 解密用到 `openssl` 命令行（macOS/Linux 自带）；百度搭子解密需要 `pip install cryptography`，其余脚本零依赖。
 
 ## 输出契约（供 Agent / 程序解析）
 
@@ -74,7 +77,7 @@ python3 scripts/minimax_signin.py status
 2. **通用 Agent Skill**——把本项目包装成 Claude Code / CodeBuddy / 自研 Agent 的技能，`examples/agent-skill-SKILL.md` 是可直接套用的模板（含调度建议、汇报格式约束、异常处理约定）；
 3. **系统级定时任务**——crontab / launchd / Windows Task Scheduler，配合 `run_all.py` 的汇总行做日志或通知。
 
-关键集成约定：三个脚本相互独立、一端失败不影响其余；所有 result 均幂等，重复执行无害；`NO_SESSION`/`NO_AUTH` 时提示用户重新登录对应客户端即可恢复。
+关键集成约定：各端脚本相互独立、一端失败不影响其余；所有 result 均幂等，重复执行无害；`NO_SESSION`/`NO_AUTH` 时提示用户重新登录对应客户端即可恢复。
 
 ## 设计要点
 
@@ -91,6 +94,7 @@ python3 scripts/minimax_signin.py status
 
 - **[88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)**：本项目灵感与 WorkBuddy 端方案的直接来源（凭据文件定位、签到/成长中心接口协议均参考该实现，并在此基础上做了沙箱兼容、时间预算、退出码分级等加固）。
 - Trae 登录态解密方案与 Trae 论坛社区公开实现交叉验证。
+- 百度搭子端协议（Cookie 加密布局、csrftoken 鉴权）为本项目独立逆向自 DuMate 客户端。
 
 ## License
 

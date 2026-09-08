@@ -90,10 +90,13 @@ launchd 的 `ExecutionTimeLimit` 默认 10 分钟会强杀进程；WorkBuddy 端
 | `WORKBUDDY_AUTH_FILE` | 指向 `workbuddy-desktop.info` 会话文件 |
 | `TRAE_STORAGE_FILE` | 指向 Trae 的 `storage.json` |
 | `MINIMAX_LS_LEVELDB` | 指向 MiniMax 的 `Local Storage/leveldb` 目录 |
+| `DUMATE_AUTH_DIR` | 指向 DuMate 数据目录（含 `auth.json` 与 `.cookie-key`） |
 | `WORKBUDDY_SIGNIN_LOG` | silent 模式日志路径 |
 | `WORKBUDDY_BUDGET_SECONDS` | WorkBuddy 端运行时间预算（默认 420s） |
 
 ## 安全须知
+
+> **依赖说明**：百度搭子（DuMate）端需要 `pip install cryptography`（AES-GCM 解密）；WorkBuddy / Trae / MiniMax 三端零第三方依赖（Trae 用系统自带 `openssl`）。
 
 - 脚本只**读取**本机凭据，不写入、不上传、不打印。
 - 把日志文件（`signin.log`）加入 `.gitignore`，避免把含积分/账号信息的运行记录提交进仓库。

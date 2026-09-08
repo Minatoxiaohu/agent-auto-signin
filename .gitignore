@@ -2,6 +2,8 @@
 # 各端凭据文件与目录（防止误拷贝进仓库）
 *.info
 storage.json
+auth.json
+.cookie-key
 workbuddy-desktop.info
 **/Local Storage/
 **/leveldb/
