@@ -7,6 +7,8 @@
 
 三个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
 
+> 💡 **项目缘起**：WorkBuddy 端的积分领取方案（凭据定位 + 接口协议）来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的启发，在此致谢；Trae 与 MiniMax Code 端为本项目独立逆向实现。
+
 **About 建议文案（GitHub 仓库描述）：**
 
 ```
@@ -87,8 +89,8 @@ python3 scripts/minimax_signin.py status
 
 ## 致谢
 
-- WorkBuddy 签到接口方案参考 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
-- Trae 登录态解密方案与 Trae 论坛社区公开实现交叉验证
+- **[88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)**：本项目灵感与 WorkBuddy 端方案的直接来源（凭据文件定位、签到/成长中心接口协议均参考该实现，并在此基础上做了沙箱兼容、时间预算、退出码分级等加固）。
+- Trae 登录态解密方案与 Trae 论坛社区公开实现交叉验证。
 
 ## License
 
