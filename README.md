@@ -1,0 +1,95 @@
+# agent-auto-signin
+
+> WorkBuddy / Trae / MiniMax Code 三款 AI 桌面端的每日免费积分自动领取脚本。
+> 纯官方接口实现、零第三方依赖、幂等可重复执行，支持一键接入任意 Agent 自动化流程。
+
+## 项目简介
+
+三个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
+
+**About 建议文案（GitHub 仓库描述）：**
+
+```
+WorkBuddy / Trae / MiniMax Code 三端每日签到自动领取脚本：纯接口实现、幂等安全、零第三方依赖，支持集成到 WorkBuddy 自动化、任意 Agent Skill 或系统 crontab。
+```
+
+Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `minimax` `python`
+
+## 支持的平台
+
+| 平台 | 每日奖励 | 凭据来源 | 接口 | 脚本 |
+|------|---------|---------|------|------|
+| WorkBuddy | 100 积分 | 桌面端写出的明文会话文件 | `{endpoint}/v2/billing/meter/daily-checkin` | `workbuddy_signin.py` |
+| Trae SOLO CN | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
+| MiniMax Code | 400 积分（连签第 4/7 天 1000） | webview localStorage（leveldb）中的 JWT | `agent.minimaxi.com/.../signin/{status,claim}` | `minimax_signin.py` |
+
+## 快速开始
+
+```bash
+# 三端全部执行（推荐，幂等可重复跑）
+python3 scripts/run_all.py
+
+# 只跑某一端
+python3 scripts/workbuddy_signin.py auto
+python3 scripts/trae_signin.py auto
+python3 scripts/minimax_signin.py auto
+
+# 调试子命令
+python3 scripts/workbuddy_signin.py status   # 只查状态
+python3 scripts/trae_signin.py status
+python3 scripts/minimax_signin.py status
+```
+
+环境要求：Python 3.8+（标准库即可）；Trae 解密用到 `openssl` 命令行（macOS/Linux 自带）。
+
+## 输出契约（供 Agent / 程序解析）
+
+每个脚本输出**一行 JSON**，人话结果在 `report` 字段：
+
+```json
+{"result": "CLAIMED", "report": "成功领取 100 积分（连续 3 天，累计 300 积分）", ...}
+```
+
+| result | 含义 | 是否失败 |
+|--------|------|---------|
+| `CLAIMED` | 本次领取成功 | 否 |
+| `ALREADY` | 今天已领过（接口幂等） | 否 |
+| `INACTIVE` | 签到活动未开启 / 今日不可领 | 否 |
+| `PENDING` | 今日可领但未领取（status 模式） | 否 |
+| `GROWTH` | WorkBuddy 成长中心执行完毕 | 视情况 |
+| `NO_SESSION` | 登录态过期，需重新登录桌面端 | 是 |
+| `NO_AUTH` | 本机未找到凭据，需先登录客户端 | 是 |
+| `NETWORK` / `TIMEOUT` | 网络不可达 / 时间预算耗尽 | 是 |
+| `ERROR` / `UNKNOWN` | 接口或脚本异常 | 是 |
+
+退出码：`0` 正常（含 ALREADY）、`1` 硬失败、`2` 用法/凭据错误。**任何情况下脚本都不会打印 token。**
+
+## 如何集成到你的 Agent 产品
+
+详见 **[docs/INTEGRATION.md](docs/INTEGRATION.md)**，三种方式：
+
+1. **WorkBuddy 自动化任务**——配置每日定时 prompt，让 Agent 读脚本输出逐端汇报（开箱即用示例）；
+2. **通用 Agent Skill**——把本项目包装成 Claude Code / CodeBuddy / 自研 Agent 的技能，`examples/agent-skill-SKILL.md` 是可直接套用的模板（含调度建议、汇报格式约束、异常处理约定）；
+3. **系统级定时任务**——crontab / launchd / Windows Task Scheduler，配合 `run_all.py` 的汇总行做日志或通知。
+
+关键集成约定：三个脚本相互独立、一端失败不影响其余；所有 result 均幂等，重复执行无害；`NO_SESSION`/`NO_AUTH` 时提示用户重新登录对应客户端即可恢复。
+
+## 设计要点
+
+- **只走接口，不模拟 GUI**：GUI 自动化在 macOS 上会触发权限问题和窗口状态异常（踩过的坑已记录在脚本注释里）。
+- **凭据零拷贝**：直接读本机桌面端已写出的凭据文件，不要求用户手工导出任何 secret。
+- **时间预算机制**（WorkBuddy 端）：受计划任务 ExecutionTimeLimit 启发，自设运行预算确保总能写出结果，不会无声死掉。
+- **沙箱友好**：用「试读 1 字节」代替 `os.path.exists()`，绕开部分 Agent 执行沙箱对受保护路径的假阴性。
+
+## 免责声明
+
+本项目仅供学习交流与个人效率自动化使用，请遵守各产品服务条款；接口协议可能随客户端版本变化，失效请提 issue。凭据仅在本地读取，任何情况下不会上传或打印。
+
+## 致谢
+
+- WorkBuddy 签到接口方案参考 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
+- Trae 登录态解密方案与 Trae 论坛社区公开实现交叉验证
+
+## License
+
+[MIT](LICENSE)

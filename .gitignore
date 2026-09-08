@@ -1,0 +1,30 @@
+# ===== 凭据 / 登录态：绝对不许入库 =====
+# 各端凭据文件与目录（防止误拷贝进仓库）
+*.info
+storage.json
+workbuddy-desktop.info
+**/Local Storage/
+**/leveldb/
+**/globalStorage/
+
+# 运行期日志与 token 快照
+*.log
+*tokens*.json
+*credential*
+*session*.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+.idea/
+.vscode/
+*.swp
