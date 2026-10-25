@@ -241,8 +241,14 @@ def _atomic_write_json(path, payload):
         raise
 
 
-def _write_back(auth_path, match_refresh, new_access, new_refresh, expires_at_ms):
-    """把刷新后的凭据写回 auth.json（保持原记录其余字段不变）。"""
+def _write_back(auth_path, match_refresh, new_access, new_refresh, expires_at_ms,
+                new_generation=None):
+    """把刷新后的凭据写回 auth.json（保持原记录其余字段不变）。
+
+    new_generation 传入时同步更新 credential.generation —— 必须与 auth-state.json
+    的 generation 保持一致，否则客户端读取时会判定 generation 不匹配
+    （auth-core.js: state.generation === credential.generation）而认为凭据不可用。
+    """
     payload = read_auth_payload(auth_path)
     if not payload:
         return False
@@ -258,8 +264,41 @@ def _write_back(auth_path, match_refresh, new_access, new_refresh, expires_at_ms
     rec["accessToken"] = new_access
     rec["refreshToken"] = new_refresh
     rec["expiresAtMs"] = float(expires_at_ms)
+    if new_generation is not None:
+        rec["generation"] = int(new_generation)
     try:
         _atomic_write_json(auth_path, payload)
+        return True
+    except Exception:
+        return False
+
+
+def _state_file_for(auth_path):
+    """auth.json 同目录下的 auth-state.json。"""
+    return os.path.join(os.path.dirname(auth_path), "auth-state.json")
+
+
+def _commit_refresh(auth_path, state_path, match_refresh, grant, new_generation):
+    """复刻客户端 refresh 的提交阶段：写 credential + 写 state（authenticated）。
+
+    客户端 auth-core.js 的顺序是 credentialStore.put → stateStore.write，
+    且 state.generation 必须等于 credential.generation。
+    """
+    if not _write_back(auth_path, match_refresh, grant["access_token"],
+                       grant["refresh_token"], grant["expires_at_ms"], new_generation):
+        return False
+    state = read_auth_payload(state_path)
+    if not isinstance(state, dict):
+        state = {"schemaVersion": 2}
+    state["status"] = "authenticated"
+    state["generation"] = int(new_generation)
+    state["scopes"] = [OAUTH_SCOPE]
+    state["audience"] = OAUTH_AUDIENCE
+    state["clientId"] = OAUTH_CLIENT_ID
+    state["storeKind"] = "file"
+    state.pop("refresh", None)
+    try:
+        _atomic_write_json(state_path, state)
         return True
     except Exception:
         return False
@@ -278,12 +317,17 @@ def _post_form(url, values):
 def refresh_oauth_token(auth_path):
     """用 refreshToken 换新的 accessToken，返回 (access_token, refresh_token, expires_at_ms)。
 
-    全程持有与客户端同款的目录锁，且成功后写回 auth.json，避免与客户端的
-    自动刷新互相踩踏（服务端 refresh token 轮换制，抢跑的一方会让另一方 invalid_grant）。
+    完整复刻客户端 auth-core.js `refreshCredential` 的两阶段协议：
+      阶段一（prepare）：把 auth-state.json 置为 refreshing，generation = max(state, credential)+1
+                        —— 先「占坑」再动 RT，防止旧 Core 复用；
+      阶段二（commit） ：换到新 grant 后写 credential + 写 state(authenticated)，
+                        且 credential.generation == state.generation。
+    全程持有与客户端同款的目录锁（auth.lock），与客户端的自动刷新互斥。
     """
     at, rt, exp, path = find_oauth_credential()
     if not rt or not path:
         return None, None, 0
+    state_path = _state_file_for(path)
 
     lock = DirLock(os.path.join(os.path.dirname(path), "auth.lock"))
     if not lock.acquire(timeout=20):
@@ -300,6 +344,17 @@ def refresh_oauth_token(auth_path):
             return at2, rt2, exp2
         rt = rt2
         path = path2
+        state_path = _state_file_for(path)
+
+        # 阶段一：读当前 generation 并预留下一个
+        state = read_auth_payload(state_path) or {}
+        cred_payload = read_auth_payload(path) or {}
+        cred_gen = 0
+        for v in (cred_payload.get("records") or {}).values():
+            if isinstance(v, dict) and v.get("refreshToken") == rt:
+                cred_gen = int(v.get("generation") or 0)
+                break
+        new_generation = max(int(state.get("generation") or 0), cred_gen) + 1
 
         try:
             body = _post_form(OAUTH_TOKEN_ENDPOINT, {
@@ -320,9 +375,12 @@ def refresh_oauth_token(auth_path):
         except Exception:
             expires_in = 3600
         expires_at = int(time.time() * 1000) + expires_in * 1000
+        grant = {"access_token": new_at, "refresh_token": new_rt,
+                 "expires_at_ms": expires_at}
 
-        # 写回原记录，让客户端后续刷新也能用上新 refresh token
-        _write_back(path, rt, new_at, new_rt, expires_at)
+        # 阶段二：写 credential + 写 state（generation 同步递增）
+        if not _commit_refresh(path, state_path, rt, grant, new_generation):
+            return None, None, 0
         return new_at, new_rt, expires_at
     finally:
         lock.release()
@@ -582,18 +640,34 @@ def device_login():
 
 
 def _store_new_credential(access, refresh, expires_in_ms):
-    """把新凭据写入 ~/.minimax/auth/prod/cn/mcode-public/auth.json（对齐客户端 recordKey）。"""
+    """把新凭据写入 ~/.minimax/auth/prod/cn/mcode-public/auth.json。
+
+    与客户端一致：credential.generation 与 auth-state.json 的 generation 必须相同，
+    且 recordKey 用客户端同样的算法（service + sha256(authHome\\0clientId) 的 base64url）。
+    """
     home = os.path.expanduser("~")
-    auth_dir = os.path.join(home, ".minimax", "auth", "prod", "cn", OAUTH_CLIENT_ID)
+    auth_home = os.path.join(home, ".minimax", "auth")
+    auth_dir = os.path.join(auth_home, "prod", "cn", OAUTH_CLIENT_ID)
     os.makedirs(auth_dir, mode=0o700, exist_ok=True)
     path = os.path.join(auth_dir, "auth.json")
+    state_path = os.path.join(auth_dir, "auth-state.json")
+
     payload = read_auth_payload(path) or {"schemaVersion": 1, "records": {}}
     records = payload.setdefault("records", {})
     key = next(iter(records), None)
     if key is None:
-        key = "com.minimax.mcode.oauth.prod.cn\0%s" % hashlib.sha256(
-            (os.path.join(home, ".minimax", "auth") + "\0" + OAUTH_CLIENT_ID).encode()
-        ).hexdigest()[:43]
+        account = base64.urlsafe_b64encode(hashlib.sha256(
+            ("%s\0%s" % (auth_home, OAUTH_CLIENT_ID)).encode()).digest()
+        ).decode().rstrip("=")
+        key = "com.minimax.mcode.oauth.prod.cn\0%s" % account
+
+    state = read_auth_payload(state_path) or {}
+    new_generation = max(int(state.get("generation") or 0), 0) + 1
+    for v in records.values():
+        if isinstance(v, dict):
+            new_generation = max(new_generation, int(v.get("generation") or 0) + 1)
+            break
+
     records[key] = {
         "accessToken": access,
         "refreshToken": refresh,
@@ -602,14 +676,31 @@ def _store_new_credential(access, refresh, expires_in_ms):
         "scopes": [OAUTH_SCOPE],
         "audience": OAUTH_AUDIENCE,
         "expiresAtMs": float(time.time() * 1000 + expires_in_ms),
-        "generation": 1,
+        "generation": new_generation,
         "schemaVersion": 1,
     }
     try:
         _atomic_write_json(path, payload)
-        return True
     except Exception:
         return False
+
+    state.update({
+        "schemaVersion": 2,
+        "status": "authenticated",
+        "storeKind": "file",
+        "clientId": OAUTH_CLIENT_ID,
+        "scopes": [OAUTH_SCOPE],
+        "audience": OAUTH_AUDIENCE,
+        "buildEnv": "prod",
+        "region": "cn",
+        "generation": new_generation,
+    })
+    state.pop("refresh", None)
+    try:
+        _atomic_write_json(state_path, state)
+    except Exception:
+        return False
+    return True
 
 
 def main():
