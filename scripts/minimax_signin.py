@@ -596,6 +596,10 @@ def device_login():
     expires_in = int(body.get("expires_in") or 300)
     interval = int(body.get("interval") or 5)
 
+    # 链接必须立刻可见（stdout 保留给最终那行 JSON，故走 stderr）
+    print("请在浏览器打开以下链接完成授权：\n  %s\n  （user_code: %s，%s 秒内有效）"
+          % (verify_uri, user_code, expires_in), file=sys.stderr, flush=True)
+
     deadline = time.time() + expires_in
     while time.time() < deadline:
         try:
