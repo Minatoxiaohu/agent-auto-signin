@@ -1,6 +1,6 @@
 ---
 name: agent-auto-signin
-description: 每日自动领取 WorkBuddy（100 分）/ Trae SOLO CN（200 分）/ MiniMax Code（400 分）/ 百度搭子 DuMate（500 分）四端免费积分。纯接口实现、幂等安全、不模拟 GUI。当用户要求「领免费积分」「自动签到」「检查签到结果」或配置每日定时领取任务时使用。
+description: 每日自动领取 WorkBuddy（100 分）/ Trae CN（200 分）/ MiniMax Code（400 分）/ 百度搭子 DuMate（500 分）四端免费积分。纯接口实现、幂等安全、不模拟 GUI。当用户要求「领免费积分」「自动签到」「检查签到结果」或配置每日定时领取任务时使用。
 ---
 
 # Agent Auto Signin — 四端每日积分领取
@@ -14,7 +14,7 @@ PY=python3
 S=<本项目路径>/scripts
 
 "$PY" "$S/workbuddy_signin.py" auto   # WorkBuddy：签到 + 成长中心（派Buddy/盲盒/任务奖）
-"$PY" "$S/trae_signin.py" auto        # Trae SOLO CN：每日 200 积分
+"$PY" "$S/trae_signin.py" auto        # Trae CN：每日 200 积分
 "$PY" "$S/minimax_signin.py" auto     # MiniMax Code：每日 400 积分（连签第 4/7 天 1000）
 "$PY" "$S/dumate_signin.py" auto      # 百度搭子 DuMate：每日 500 积分
 ```

@@ -154,7 +154,12 @@ def checkin(claim=False):
         return 1, {"result": "NO_SESSION", "report": "登录态已失效（HTTP %s），请重新登录百度搭子桌面端" % ccode}
     if ccode == 200 and cbody.get("success"):
         got = cbody.get("result")
-        show = "成功领取 %s 积分" % got if isinstance(got, int) else "签到成功"
+        # 注意：服务端 result 有时直接回布尔 true（表示已发奖但未带数额），
+        # 而 isinstance(True, int) 为真，会打成「成功领取 True 积分」——须排除 bool。
+        if isinstance(got, int) and not isinstance(got, bool):
+            show = "成功领取 %s 积分" % got
+        else:
+            show = "签到成功（本次已发放每日奖励）"
         return 0, {"result": "CLAIMED", "report": show + tail, "total_points": total}
     # 已签过的业务幂等：重查一次状态按 ALREADY 处理
     scode2, sbody2 = request("api/dumate/points/loginBonusInfo", cookie_str, csrf)

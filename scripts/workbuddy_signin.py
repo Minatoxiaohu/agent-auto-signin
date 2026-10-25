@@ -23,6 +23,7 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
   python signin.py all      # 查签到状态 + 领取（调试）
 """
 
+import glob
 import json
 import os
 import ssl
@@ -106,6 +107,20 @@ def _readable(path):
         return False
 
 
+def _has_plain_token(path):
+    """会话文件的 auth.accessToken 是否为明文字符串。
+
+    客户端约 2026-09-20 起把 token 改写为加密信封（{$wbEncrypted:1, envelope:...}），
+    明文字符串时代此判断恒真；信封格式无法直接用，需要回退到旧备份文件。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return isinstance((data.get("auth") or {}).get("accessToken"), str)
+    except Exception:
+        return False
+
+
 def find_auth_file():
     """按平台探测 WorkBuddy 桌面端写出的登录凭据文件，支持环境变量覆盖。
 
@@ -126,7 +141,17 @@ def find_auth_file():
     ]
     for c in candidates:
         if _readable(c):
-            return c, candidates
+            if _has_plain_token(c):
+                return c, candidates
+            # 主文件是加密信封格式 → 回退到同目录按修改时间最新的、仍含明文 token 的备份
+            d = os.path.dirname(c)
+            backups = sorted(
+                (p for p in glob.glob(os.path.join(d, "*.info")) if os.path.abspath(p) != os.path.abspath(c)),
+                key=os.path.getmtime, reverse=True)
+            for b in backups:
+                if _has_plain_token(b):
+                    return b, candidates
+            return c, candidates  # 没有明文备份，返回原文件让上层报 NO_SESSION
     return None, candidates
 
 

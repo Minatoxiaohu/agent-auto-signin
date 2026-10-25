@@ -22,8 +22,8 @@ Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `mini
 | 平台 | 每日奖励 | 凭据来源 | 接口 | 脚本 |
 |------|---------|---------|------|------|
 | WorkBuddy | 100 积分 | 桌面端写出的明文会话文件 | `{endpoint}/v2/billing/meter/daily-checkin` | `workbuddy_signin.py` |
-| Trae SOLO CN | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
-| MiniMax Code | 400 积分（连签第 4/7 天 1000） | webview localStorage（leveldb）中的 JWT | `agent.minimaxi.com/.../signin/{status,claim}` | `minimax_signin.py` |
+| Trae CN（原 SOLO CN） | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
+| MiniMax Code | 400 积分（连签第 4/7 天 1000） | `~/.minimax/auth/<env>/<region>/mcode-public/auth.json` 的 OAuth token（`mmoat_` 前缀） | `agent.minimax.cn/.../signin/{status,claim}` | `minimax_signin.py` |
 | 百度搭子 DuMate | 500 积分 | `auth.json` 加密 Cookie（AES-256-GCM 本地解密） | `console.bce.baidu.com/api/dumate/points/{loginBonusInfo,loginBonus}` | `dumate_signin.py` |
 
 ## 快速开始
@@ -68,6 +68,30 @@ python3 scripts/dumate_signin.py status
 | `ERROR` / `UNKNOWN` | 接口或脚本异常 | 是 |
 
 退出码：`0` 正常（含 ALREADY）、`1` 硬失败、`2` 用法/凭据错误。**任何情况下脚本都不会打印 token。**
+
+## 常见问题：MiniMax Code 报 `NO_SESSION` / `NO_AUTH`
+
+MiniMax 桌面端自 2026-10-19 起改为 **Shared MCode OAuth** 架构，凭据不再存放在 webview
+localStorage 里，而是由主进程写入：
+
+```
+~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json
+```
+
+里面是**不透明 token**（`mmoat_` 前缀，非 JWT），访问签到接口需要
+`Authorization: Bearer <token>`，接口域名也从 `agent.minimaxi.com` 迁到了 `agent.minimax.cn`。
+本项目的脚本已适配新架构（同时保留旧版 leveldb JWT 作为回退路径）。
+
+如果你的客户端升级较新、脚本仍读不到凭据，可以走 **device flow 重新授权**：
+
+```bash
+python3 scripts/minimax_signin.py login
+# 打印形如 https://account.minimax.cn/oauth-authorize?user_code=XXXX-XXXX 的链接
+# 浏览器打开确认后，凭据自动写入 auth.json，之后 auto 即可正常领取
+```
+
+accessToken 有效期仅 1 小时，脚本会用 `refresh_token` 自动续期（**续期时会带跨进程锁并把新
+token 写回文件**，与服务端的 refresh token 轮换机制兼容，因此客户端不在线也能长期运行）。
 
 ## 如何集成到你的 Agent 产品
 

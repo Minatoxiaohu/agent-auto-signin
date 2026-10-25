@@ -1,10 +1,29 @@
 """MiniMax Code 桌面端每日签到自动领取脚本（每日 400 积分，连签第 4/7 天 1000）。
 
-原理：MiniMax 桌面端的内嵌 webview 把登录 JWT 明文存在 Electron localStorage
-（leveldb 文件）里，脚本直接从 leveldb 提取最新有效 JWT，复刻 web 前端的
-md5 双重签名协议，直调官方接口：
-  GET  https://agent.minimaxi.com/minimax-cloud/api/v1/signin/status  查询签到面板
-  POST https://agent.minimaxi.com/minimax-cloud/api/v1/signin/claim   领取今日积分
+原理：MiniMax 桌面端 2026-10-19 起升级为 Shared MCode OAuth 架构，登录凭据不再
+写在 webview localStorage 里，而是由主进程 OAuth 核心写入
+    ~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json
+凭据是 **不透明 token**（`mmoat_` 前缀，非 JWT），访问签到接口需带
+`Authorization: Bearer <accessToken>`。
+
+accessToken 有效期 1 小时，refreshToken 可调 `https://account.minimax.cn/oauth2/token`
+（grant_type=refresh_token）自助续期，因此脚本可在客户端不在线时长期免登录运行。
+
+⚠️⚠️ refresh token 是 **轮换制**（服务端每次刷新都换发新的 refresh token，旧 token 立即作废）。
+所以刷新必须：
+  1. 拿到 proper-lockfile 的同名目录锁（客户端 `cross-process-lock.js` 用的是
+     `auth.lock` + `proper-lockfile`，stale 30s），与客户端的自动刷新互斥；
+  2. 刷新成功后 **把新 accessToken/refreshToken 原子写回 auth.json**，
+     否则客户端下次读到旧 refresh token 会拿到 invalid_grant 而自登出。
+⚠️ 早期版本脚本裸调 refresh、不写回、也不加锁，导致客户端凭据被清空（2026-10-25 事故）。
+
+⚠️ 历史兼容：2026-10-19 之前的老版本把明文 JWT 写在
+    ~/Library/Application Support/MiniMax/Local Storage/leveldb/
+且用 `token` 请求头 + query 参数传参。脚本保留该路径作为回退。
+
+接口：
+  GET  https://agent.minimax.cn/minimax-cloud/api/v1/signin/status  查询签到面板
+  POST https://agent.minimax.cn/minimax-cloud/api/v1/signin/claim   领取今日积分
 
 签名协议（源码逆向自 prod-web-sh 前端，2026-09-09 全链路实测通过）：
   x-timestamp = 秒级时间戳
@@ -16,30 +35,47 @@ md5 双重签名协议，直调官方接口：
 用法：
   python minimax_signin.py auto    # 查状态→今日可领才领（幂等，日常用这个）
   python minimax_signin.py status  # 仅查状态（调试）
+  python minimax_signin.py login   # device flow 重新授权（需人工在浏览器确认 code）
 
 输出一行 JSON，人话在 report 字段。任何情况下不打印 token/JWT。
 """
 
 import base64
+import errno
 import glob
 import hashlib
 import json
 import os
 import re
+import secrets
+import shutil
 import ssl
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-API_BASE = "https://agent.minimaxi.com"
+API_BASE = "https://agent.minimax.cn"
+OAUTH_TOKEN_ENDPOINT = "https://account.minimax.cn/oauth2/token"
+OAUTH_DEVICE_ENDPOINT = "https://account.minimax.cn/oauth2/device/code"
+OAUTH_CLIENT_ID = "mcode-public"
+OAUTH_SCOPE = "agent.default"
+OAUTH_AUDIENCE = "agent-backend"
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
 LEVELDB_GLOB = os.path.join("Library", "Application Support", "MiniMax",
                             "Local Storage", "leveldb")
 CONFIG_REL = os.path.join("Library", "Application Support", "MiniMax",
                           "minimax-agent-cn-config.json")
+# 新版 OAuth 凭据目录（~ 下的 dataDir）
+OAUTH_AUTH_GLOB = os.path.join(".minimax", "auth", "*", "*", "*", "auth.json")
 JWT_RE = re.compile(rb"eyJ[A-Za-z0-9_\-\.]{80,}")
 REQUEST_TIMEOUT = 20
+LOCK_STALE_SEC = 30
+# 桌面端实际使用的 UA（客户端 api 日志里的真实值）
+DESKTOP_VERSION = os.environ.get("MINIMAX_DESKTOP_VERSION", "3.1.6")
 
 
 def emit(out):
@@ -55,8 +91,266 @@ def _readable(path):
         return False
 
 
-def find_jwt():
-    """从 leveldb（按修改时间新→旧）提取第一个未过期的登录 JWT。
+# --------------------------------------------------------------------------
+# 跨进程锁（对齐客户端的 proper-lockfile 行为）
+# --------------------------------------------------------------------------
+
+class DirLock:
+    """proper-lockfile 风格的目录锁。
+
+    proper-lockfile 默认 realpath=false，在 <target>.lock 目录下用 mkdir 原子创建，
+    并把持有者信息写进 <target>.lock/holder 文件；stale 默认 30s。
+    这里实现同样的语义，让脚本与客户端的自动刷新互斥。
+    """
+
+    def __init__(self, target, stale_sec=LOCK_STALE_SEC):
+        self.path = target + ".lock"
+        self.stale_sec = stale_sec
+        self.acquired = False
+
+    def _holder_pid(self):
+        try:
+            with open(os.path.join(self.path, "holder"), "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def _is_stale(self):
+        try:
+            age = time.time() - os.stat(self.path).st_mtime
+        except Exception:
+            return True
+        if age > self.stale_sec:
+            return True
+        # 同进程残留（上次异常退出）也视为 stale
+        holder = self._holder_pid()
+        if holder.startswith("pid:"):
+            try:
+                pid = int(holder.split(":", 1)[1].split(",")[0])
+            except Exception:
+                return False
+            if pid == os.getpid():
+                return True
+        return False
+
+    def acquire(self, timeout=15):
+        deadline = time.time() + timeout
+        while True:
+            try:
+                os.mkdir(self.path, 0o700)
+                try:
+                    with open(os.path.join(self.path, "holder"), "w", encoding="utf-8") as f:
+                        f.write("pid:%d,%s" % (os.getpid(), time.time()))
+                except Exception:
+                    pass
+                self.acquired = True
+                return True
+            except OSError as e:
+                if e.errno != errno.EEXIST:
+                    raise
+                if self._is_stale():
+                    try:
+                        shutil.rmtree(self.path, ignore_errors=True)
+                        continue
+                    except Exception:
+                        pass
+                if time.time() > deadline:
+                    return False
+                time.sleep(0.2)
+
+    def release(self):
+        if not self.acquired:
+            return
+        self.acquired = False
+        shutil.rmtree(self.path, ignore_errors=True)
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
+# --------------------------------------------------------------------------
+# 凭据读写
+# --------------------------------------------------------------------------
+
+def _auth_file_candidates():
+    home = os.path.expanduser("~")
+    override = os.environ.get("MINIMAX_OAUTH_AUTH_FILE")
+    if override:
+        return [override]
+    return sorted(glob.glob(os.path.join(home, OAUTH_AUTH_GLOB)))
+
+
+def read_auth_payload(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def find_oauth_credential():
+    """读取新版 OAuth 凭据文件，返回 (access_token, refresh_token, expires_at_ms, path)。
+
+    路径形如 ~/.minimax/auth/prod/cn/mcode-public/auth.json，
+    结构 {"schemaVersion":1,"records":{"<service>\\0<account>":{accessToken,refreshToken,...}}}
+    多条记录时取 expiresAtMs 最晚的一条。
+    """
+    best = None
+    for p in _auth_file_candidates():
+        if not p or not _readable(p):
+            continue
+        payload = read_auth_payload(p)
+        if not payload:
+            continue
+        records = payload.get("records") or {}
+        if not isinstance(records, dict):
+            continue
+        for rec in records.values():
+            if not isinstance(rec, dict):
+                continue
+            at = rec.get("accessToken")
+            if not at:
+                continue
+            exp = rec.get("expiresAtMs") or 0
+            if best is None or exp > best[2]:
+                best = (at, rec.get("refreshToken"), exp, p)
+    if best:
+        return best[0], best[1], best[2], best[3]
+    return None, None, 0, None
+
+
+def _atomic_write_json(path, payload):
+    """原子写 + 私有权限（对齐客户端 atomicWritePrivateFile）。"""
+    directory = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".auth-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+
+def _write_back(auth_path, match_refresh, new_access, new_refresh, expires_at_ms):
+    """把刷新后的凭据写回 auth.json（保持原记录其余字段不变）。"""
+    payload = read_auth_payload(auth_path)
+    if not payload:
+        return False
+    records = payload.setdefault("records", {})
+    key = None
+    for k, v in records.items():
+        if isinstance(v, dict) and v.get("refreshToken") == match_refresh:
+            key = k
+            break
+    if key is None:
+        return False
+    rec = records[key]
+    rec["accessToken"] = new_access
+    rec["refreshToken"] = new_refresh
+    rec["expiresAtMs"] = float(expires_at_ms)
+    try:
+        _atomic_write_json(auth_path, payload)
+        return True
+    except Exception:
+        return False
+
+
+def _post_form(url, values):
+    payload = urllib.parse.urlencode(values).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def refresh_oauth_token(auth_path):
+    """用 refreshToken 换新的 accessToken，返回 (access_token, refresh_token, expires_at_ms)。
+
+    全程持有与客户端同款的目录锁，且成功后写回 auth.json，避免与客户端的
+    自动刷新互相踩踏（服务端 refresh token 轮换制，抢跑的一方会让另一方 invalid_grant）。
+    """
+    at, rt, exp, path = find_oauth_credential()
+    if not rt or not path:
+        return None, None, 0
+
+    lock = DirLock(os.path.join(os.path.dirname(path), "auth.lock"))
+    if not lock.acquire(timeout=20):
+        # 拿不到锁就让客户端自己刷，本轮直接用现有 token
+        return (at, rt, exp) if at else (None, None, 0)
+
+    try:
+        # 拿到锁后重读：客户端可能刚好刷新过
+        at2, rt2, exp2, path2 = find_oauth_credential()
+        if not rt2 or not path2:
+            return None, None, 0
+        if exp2 > time.time() * 1000 + 60_000:
+            # 已被其它进程刷新为有效态，直接用，无需再刷
+            return at2, rt2, exp2
+        rt = rt2
+        path = path2
+
+        try:
+            body = _post_form(OAUTH_TOKEN_ENDPOINT, {
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": OAUTH_CLIENT_ID,
+                "scope": OAUTH_SCOPE,
+                "audience": OAUTH_AUDIENCE,
+            })
+        except Exception:
+            return None, None, 0
+        new_at = body.get("access_token")
+        new_rt = body.get("refresh_token")
+        if not new_at or not new_rt:
+            return None, None, 0
+        try:
+            expires_in = int(body.get("expires_in") or 3600)
+        except Exception:
+            expires_in = 3600
+        expires_at = int(time.time() * 1000) + expires_in * 1000
+
+        # 写回原记录，让客户端后续刷新也能用上新 refresh token
+        _write_back(path, rt, new_at, new_rt, expires_at)
+        return new_at, new_rt, expires_at
+    finally:
+        lock.release()
+
+
+def get_bearer_token():
+    """返回 (access_token, kind)。kind = 'oauth' | 'legacy-jwt'。
+
+    优先使用新版 OAuth 凭据；accessToken 过期时用 refreshToken 自助续期。
+    找不到 OAuth 凭据时回退到老版 leveldb 明文 JWT。
+    """
+    at, rt, exp, path = find_oauth_credential()
+    if at:
+        if exp > time.time() * 1000 + 60_000:
+            return at, "oauth"
+        new_at, new_rt, new_exp = refresh_oauth_token(path)
+        if new_at and new_exp > time.time() * 1000 + 60_000:
+            return new_at, "oauth"
+        # 刷新失败仍返回旧 token，让服务端给出权威结论
+        return at, "oauth"
+    jwt = find_legacy_jwt()
+    if jwt:
+        return jwt, "legacy-jwt"
+    return None, None
+
+
+def find_legacy_jwt():
+    """旧版：从 leveldb（按修改时间新→旧）提取第一个未过期的登录 JWT。
 
     leveldb 里同时存有多个历史 JWT（token 滚动刷新），必须取 exp 未过期的；
     只认 payload 含 exp+user 字段的（登录 token），避开其它业务的 JWT。
@@ -88,11 +382,8 @@ def find_jwt():
                 continue
             if isinstance(data, dict) and data.get("exp") and data["exp"] > now \
                     and "user" in data:
-                return jwt, None, None
-    if seen:
-        return None, "NO_SESSION", "本地 JWT 已全部过期，请打开 MiniMax Code 客户端重新登录"
-    return None, "NO_AUTH", ("未在 leveldb 中找到登录 token，请先登录 MiniMax Code 桌面端"
-                             "（查找目录：%s）" % (files[0] if files else os.path.join(home, LEVELDB_GLOB)))
+                return jwt
+    return None
 
 
 def real_user_id():
@@ -105,19 +396,29 @@ def real_user_id():
         return "0"
 
 
-def signed_request(path, jwt, uid, method="GET", body=""):
-    """复刻 web 前端签名协议发请求；返回 (http_code, dict)。"""
+# --------------------------------------------------------------------------
+# 请求
+# --------------------------------------------------------------------------
+
+def signed_request(path, token, kind, uid, method="GET", body=""):
+    """复刻客户端签名协议发请求；返回 (http_code, dict)。
+
+    kind='oauth' 用 `Authorization: Bearer <token>`；
+    kind='legacy-jwt' 用 `token` 头 + query 参数（旧客户端行为）。
+    """
     ms = int(time.time() * 1000)
     sec = ms // 1000
     params = [
         ("device_platform", "web"), ("biz_id", "3"), ("app_id", "3001"),
-        ("version_code", "22201"), ("unix", str(ms)), ("timezone_offset", "480"),
-        ("timezone_id", "Asia/Shanghai"), ("sys_language", "zh"), ("lang", "zh"),
+        ("version_code", "22201"), ("unix", str(ms)), ("timezone_offset", "28800"),
+        ("is_desktop", "1"), ("desktop_version", DESKTOP_VERSION),
+        ("sys_language", "zh"), ("lang", "zh"),
         ("uuid", "null"), ("device_id", "48372915"), ("os_name", "macOS"),
         ("browser_name", "Chrome"), ("browser_language", "zh-CN"),
         ("browser_platform", "MacIntel"), ("user_id", uid),
         ("op_ticket", "undefined"), ("screen_width", "1512"), ("screen_height", "982"),
-        ("unix", str(ms)), ("token", jwt),
+        ("client", "desktop"),
+        ("unix", str(ms)), ("token", token),
     ]
     full = "%s?%s" % (path, urllib.parse.urlencode(params))
     yy = hashlib.md5(("%s_%s%s%s" % (urllib.parse.quote(full), body,
@@ -125,12 +426,18 @@ def signed_request(path, jwt, uid, method="GET", body=""):
                                      "ooui")).encode()).hexdigest()
     xsig = hashlib.md5(("%sI*7Cf%%WZ#S&%%1RlZJ&C2%s" % (sec, body)).encode()).hexdigest()
     headers = {
-        "token": jwt, "Content-Type": "application/json",
+        "Content-Type": "application/json",
         "x-timestamp": str(sec), "x-signature": xsig, "yy": yy,
         "Origin": API_BASE, "Referer": API_BASE + "/",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "MiniMaxAgent Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) MiniMax/%s "
+                      "Chrome/148.0.7778.280 Safari/537.36" % DESKTOP_VERSION,
     }
+    if kind == "oauth":
+        headers["Authorization"] = "Bearer " + token
+    else:
+        headers["token"] = token
     data = body.encode() if method == "POST" else None
     req = urllib.request.Request(API_BASE + full, data=data, headers=headers, method=method)
     try:
@@ -146,12 +453,14 @@ def signed_request(path, jwt, uid, method="GET", body=""):
 
 
 def checkin(claim=False):
-    jwt, err_code, err_msg = find_jwt()
-    if err_code:
-        return 2 if err_code == "NO_AUTH" else 1, {"result": err_code, "report": err_msg}
+    token, kind = get_bearer_token()
+    if not token:
+        return 2, {"result": "NO_AUTH", "report": (
+            "未找到登录凭据（新版 OAuth 凭据文件与旧版 leveldb JWT 均无），"
+            "请打开 MiniMax Code 客户端重新登录")}
     uid = real_user_id()
 
-    scode, sbody = signed_request("/minimax-cloud/api/v1/signin/status", jwt, uid)
+    scode, sbody = signed_request("/minimax-cloud/api/v1/signin/status", token, kind, uid)
     if scode == -1:
         return 1, {"result": "NETWORK", "report": "网络不可达，签到跳过（%s）" % (sbody.get("error") or "")}
     base = sbody.get("base_resp") or {} if isinstance(sbody, dict) else {}
@@ -178,7 +487,7 @@ def checkin(claim=False):
         return 0, {"result": "PENDING", "report": "今日可领 %s 积分（%s）" % (
             today.get("points"), streak_txt)}
 
-    ccode, cbody = signed_request("/minimax-cloud/api/v1/signin/claim", jwt, uid,
+    ccode, cbody = signed_request("/minimax-cloud/api/v1/signin/claim", token, kind, uid,
                                   method="POST", body="{}")
     if ccode == -1:
         return 1, {"result": "NETWORK", "report": "领取请求未能送达，下次自动重试"}
@@ -197,6 +506,112 @@ def checkin(claim=False):
         cbase.get("status_msg") or json.dumps(cbody, ensure_ascii=False)[:120], ccode)}
 
 
+# --------------------------------------------------------------------------
+# device flow 重新授权
+# --------------------------------------------------------------------------
+
+def device_login():
+    """device flow 重新授权：打印验证链接与 user_code，轮询直到用户确认。
+
+    与客户端 `oauth-client.js` 的 startDeviceAuthorization / pollDeviceToken 完全一致。
+    拿到 token 后写入 ~/.minimax/auth/prod/cn/mcode-public/auth.json。
+    """
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
+    try:
+        body = _post_form(OAUTH_DEVICE_ENDPOINT, {
+            "client_id": OAUTH_CLIENT_ID,
+            "scope": OAUTH_SCOPE,
+            "audience": OAUTH_AUDIENCE,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        })
+    except Exception as e:
+        return 1, {"result": "ERROR", "report": "device code 申请失败：%s" % e}
+    device_code = body.get("device_code")
+    user_code = body.get("user_code")
+    verify_uri = body.get("verification_uri_complete") or body.get("verification_uri")
+    if not device_code or not user_code or not verify_uri:
+        return 1, {"result": "ERROR", "report": "device code 响应异常：%s" % json.dumps(
+            body, ensure_ascii=False)[:200]}
+    expires_in = int(body.get("expires_in") or 300)
+    interval = int(body.get("interval") or 5)
+
+    deadline = time.time() + expires_in
+    while time.time() < deadline:
+        try:
+            tok_body = _post_form(OAUTH_TOKEN_ENDPOINT, {
+                "grant_type": DEVICE_GRANT_TYPE,
+                "device_code": device_code,
+                "client_id": OAUTH_CLIENT_ID,
+                "code_verifier": verifier,
+            })
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read().decode("utf-8", "replace"))
+            except Exception:
+                err = {}
+            code = err.get("error")
+            if code == "authorization_pending":
+                time.sleep(interval)
+                continue
+            if code == "slow_down":
+                interval += 5
+                time.sleep(interval)
+                continue
+            return 1, {"result": "ERROR", "report": "授权失败：%s（%s）" % (
+                code or "http_%s" % e.code, err.get("error_description") or "")}
+        except Exception as e:
+            return 1, {"result": "ERROR", "report": "轮询异常：%s" % e}
+
+        access = tok_body.get("access_token")
+        refresh = tok_body.get("refresh_token")
+        if not access or not refresh:
+            time.sleep(interval)
+            continue
+        try:
+            expires_in_tok = int(tok_body.get("expires_in") or 3600)
+        except Exception:
+            expires_in_tok = 3600
+        saved = _store_new_credential(access, refresh, expires_in_tok * 1000)
+        return 0, {"result": "CLAIMED" if saved else "ERROR",
+                   "report": ("授权成功，凭据已写入 auth.json" if saved
+                              else "授权成功，但写入 auth.json 失败")}
+    return 1, {"result": "ERROR", "report": "授权超时（%ss 内未确认）" % expires_in}
+
+
+def _store_new_credential(access, refresh, expires_in_ms):
+    """把新凭据写入 ~/.minimax/auth/prod/cn/mcode-public/auth.json（对齐客户端 recordKey）。"""
+    home = os.path.expanduser("~")
+    auth_dir = os.path.join(home, ".minimax", "auth", "prod", "cn", OAUTH_CLIENT_ID)
+    os.makedirs(auth_dir, mode=0o700, exist_ok=True)
+    path = os.path.join(auth_dir, "auth.json")
+    payload = read_auth_payload(path) or {"schemaVersion": 1, "records": {}}
+    records = payload.setdefault("records", {})
+    key = next(iter(records), None)
+    if key is None:
+        key = "com.minimax.mcode.oauth.prod.cn\0%s" % hashlib.sha256(
+            (os.path.join(home, ".minimax", "auth") + "\0" + OAUTH_CLIENT_ID).encode()
+        ).hexdigest()[:43]
+    records[key] = {
+        "accessToken": access,
+        "refreshToken": refresh,
+        "tokenType": "Bearer",
+        "clientId": OAUTH_CLIENT_ID,
+        "scopes": [OAUTH_SCOPE],
+        "audience": OAUTH_AUDIENCE,
+        "expiresAtMs": float(time.time() * 1000 + expires_in_ms),
+        "generation": 1,
+        "schemaVersion": 1,
+    }
+    try:
+        _atomic_write_json(path, payload)
+        return True
+    except Exception:
+        return False
+
+
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "auto"
     try:
@@ -204,8 +619,10 @@ def main():
             code, out = checkin(claim=True)
         elif action == "status":
             code, out = checkin(claim=False)
+        elif action == "login":
+            code, out = device_login()
         else:
-            code, out = 2, {"result": "ERROR", "report": "未知命令：%s（可用：auto / status）" % action}
+            code, out = 2, {"result": "ERROR", "report": "未知命令：%s（可用：auto / status / login）" % action}
     except Exception as e:
         code, out = 2, {"result": "ERROR", "report": "脚本运行异常（%s: %s）" % (type(e).__name__, e)}
     emit(out)

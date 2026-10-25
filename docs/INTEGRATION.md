@@ -89,7 +89,9 @@ launchd 的 `ExecutionTimeLimit` 默认 10 分钟会强杀进程；WorkBuddy 端
 |------|------|
 | `WORKBUDDY_AUTH_FILE` | 指向 `workbuddy-desktop.info` 会话文件 |
 | `TRAE_STORAGE_FILE` | 指向 Trae 的 `storage.json` |
-| `MINIMAX_LS_LEVELDB` | 指向 MiniMax 的 `Local Storage/leveldb` 目录 |
+| `MINIMAX_LS_LEVELDB` | 指向 MiniMax 的 `Local Storage/leveldb` 目录（旧版回退路径） |
+| `MINIMAX_OAUTH_AUTH_FILE` | 指向 MiniMax 新版 OAuth 凭据 `auth.json`（默认自动探测 `~/.minimax/auth/*/*/*/auth.json`） |
+| `MINIMAX_DESKTOP_VERSION` | MiniMax 桌面端版本号（默认 3.1.6，仅影响风控头，可按客户端实际版本覆盖） |
 | `DUMATE_AUTH_DIR` | 指向 DuMate 数据目录（含 `auth.json` 与 `.cookie-key`） |
 | `WORKBUDDY_SIGNIN_LOG` | silent 模式日志路径 |
 | `WORKBUDDY_BUDGET_SECONDS` | WorkBuddy 端运行时间预算（默认 420s） |
