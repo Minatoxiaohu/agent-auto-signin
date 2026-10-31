@@ -23,8 +23,25 @@ Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `mini
 |------|---------|---------|------|------|
 | WorkBuddy | 100 积分 | 桌面端写出的明文会话文件 | `{endpoint}/v2/billing/meter/daily-checkin` | `workbuddy_signin.py` |
 | Trae CN（原 SOLO CN） | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
-| MiniMax Code | 400 积分（连签第 4/7 天 1000） | `~/.minimax/auth/<env>/<region>/mcode-public/auth.json` 的 OAuth token（`mmoat_` 前缀） | `agent.minimax.cn/.../signin/{status,claim}` | `minimax_signin.py` |
+| MiniMax Code | 400 积分（连签第 4/7 天 1000） | 新版（≥2026-10-19）：`~/.minimax/auth/<env>/<region>/mcode-public/auth.json` 的 OAuth token（`mmoat_` 前缀）；旧版回退 webview leveldb JWT | `agent.minimax.cn/.../signin/{status,claim}` | `minimax_signin.py` |
 | 百度搭子 DuMate | 500 积分 | `auth.json` 加密 Cookie（AES-256-GCM 本地解密） | `console.bce.baidu.com/api/dumate/points/{loginBonusInfo,loginBonus}` | `dumate_signin.py` |
+
+### 客户端版本相关注意事项
+
+- **Trae 已更名为 Trae CN**（2026-10-14）：App 从 `TRAE SOLO CN.app` 变为 `Trae CN.app`，数据目录同步变为
+  `~/Library/Application Support/Trae CN/`，`product.json` 的 `packageType` 变为 `TRAE_CN`
+  （客户端据此发 `req_source=1`，旧值 2 会被拒）。脚本自动读取 `product.json` 的 `appVersion` / `packageType`，
+  客户端升级无需手改。
+- **Trae 的 `x-device-id` 必须是 aha 服务端注册 ID**（纯数字，如 `3340774818975139`），
+  持久化在 `~/Library/Application Support/Trae CN/ahanet/tt_net_config.config`。
+  用 VS Code 的 `@vscode/deviceid`（UUID 形态）会被服务端判定为非客户端请求，
+  `claim` 恒返回 `9074 当前参与用户太多`（而 `status` 不校验该头，所以看起来"状态正常"）。
+- **MiniMax Code 于 2026-10-19 起切换为 Shared MCode OAuth**：凭据从 webview leveldb 明文 JWT
+  改为 `auth.json` 中的不透明 `mmoat_` token，鉴权头改为 `Authorization: Bearer`，域名改为 `agent.minimax.cn`。
+  脚本已适配新版，并支持 `minimax_signin.py login`（device flow + PKCE）重新授权。
+  ⚠️ refresh token 是**轮换制**，服务端每次刷新都换发新 token、旧 token 立即作废，
+  脚本刷新后必须原子写回 `auth.json`，切勿"只调 refresh 不写回"（会导致客户端自登出）。
+
 
 ## 快速开始
 

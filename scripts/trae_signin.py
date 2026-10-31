@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import ssl
 import subprocess
 import sys
@@ -57,6 +58,19 @@ STORAGE_REL = os.path.join("TRAE SOLO CN", "User", "globalStorage", "storage.jso
 # 老路径不再产生 storage.json → 脚本曾报 NO_AUTH「未找到 storage.json」。两个都留着。
 STORAGE_REL_ALT = os.path.join("Trae CN", "User", "globalStorage", "storage.json")
 REQUEST_TIMEOUT = 20
+
+# 2026-10-31 修复 claim 长期 9074 的真正根因：
+# 客户端 `_applyUgDeviceHeaders` 里 x-device-id = iCubeDeviceRegisterMainService.guaranteedDeviceId
+# （aha 设备注册服务下发的**服务端注册 ID**，纯数字，如 3340774818975139），
+# 而脚本一直发 VS Code 的 deviceid（`@vscode/deviceid` 缓存的 UUID，cb2b69b7-…）→ 服务端判定非客户端
+# 请求 → claim 返 9074「当前参与用户太多」，而 status 不校验该头所以一直正常。
+# 该注册 ID 持久化在 `~/Library/Application Support/<DataDir>/ahanet/tt_net_config.config`
+# （格式：device_id&#*3340774818975139@$*tnc_abtest&#*…@$*…）。
+# 实测：换成真实注册 ID 后同一请求立即 code=0 成功。
+AHA_NET_CONFIG_RELS = [
+    os.path.join("Trae CN", "ahanet", "tt_net_config.config"),
+    os.path.join("TRAE SOLO CN", "ahanet", "tt_net_config.config"),
+]
 
 # product.json 位置（用于动态读取 appVersion / packageType，必须与真实客户端一致）
 APP_JSON_CANDIDATES = [
@@ -157,9 +171,35 @@ def request(url, headers, body=None, timeout=REQUEST_TIMEOUT):
         return -1, {"error": str(e)}
 
 
+def get_aha_device_id():
+    """客户端真正使用的 x-device-id：aha 设备注册服务下发的服务端注册 ID（纯数字）。
+
+    来源：~/Library/Application Support/<DataDir>/ahanet/tt_net_config.config
+    格式：device_id&#*3340774818975139@$*tnc_abtest&#*…
+    2026-10-31 实测：claim 只认这个 ID，发 VS Code 的 UUID deviceid 一律 9074。
+    """
+    base = os.path.expanduser("~")
+    for rel in AHA_NET_CONFIG_RELS:
+        path = os.path.join(base, "Library", "Application Support", rel)
+        if not _readable(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            continue
+        m = re.search(r"device_id&#\*(\d{6,25})@\$\*", content)
+        if m:
+            return m.group(1)
+    return None
+
+
 def get_device_id(storage_path):
-    """Trae 桌面端发 claim 必须带 x-device-id，值来自 @vscode/deviceid 缓存文件
-    （guaranteedDeviceId），即 storage.json 里的 telemetry.devDeviceId。"""
+    """x-device-id：优先用 aha 服务端注册 ID（客户端唯一会发成功的那个），
+    缺失时回退 VS Code 的 @vscode/deviceid 缓存，再回退 storage.json 的 telemetry.devDeviceId。"""
+    aha = get_aha_device_id()
+    if aha:
+        return aha
     candidates = [
         os.path.join(os.path.expanduser("~"), "Library", "Application Support",
                      "Microsoft", "DeveloperTools", "deviceid"),
@@ -223,7 +263,8 @@ def build_headers(token, region, storage_path):
     客户端实测（2026-10-19 逆向 /Applications/Trae CN.app/.../out/main.js @1966800）：
       - Content-Type: application/json
       - Authorization: Cloud-IDE-JWT <token>        （mixAuthorization）
-      - x-device-id     = guaranteedDeviceId
+      - x-device-id     = guaranteedDeviceId        ⚠️= **aha 服务端注册 ID**（纯数字），
+                          不是 VS Code 的 UUID deviceid；发错一律 claim 9074（2026-10-31 修复）
       - x-device-brand  = commonParams.device_model   （hw.model，如 Mac14,5）
       - x-device-type   = commonParams.os_name        （macOS）
       - x-os-version    = commonParams.os_version     （如 27.0.1）
