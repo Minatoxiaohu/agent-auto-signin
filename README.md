@@ -1,21 +1,21 @@
 # agent-auto-signin
 
-> WorkBuddy / Trae / MiniMax Code / 百度搭子（DuMate）四款 AI 桌面端的每日免费积分自动领取脚本。
+> WorkBuddy / Trae / MiniMax Code / 百度搭子（DuMate）/ TeleAgent 五款 AI 桌面端的每日免费积分自动领取脚本。
 > 纯官方接口实现、幂等可重复执行，支持一键接入任意 Agent 自动化流程。
 
 ## 项目简介
 
-四个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分、百度搭子每日 500 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
+五个 AI 桌面端产品每天都有「签到领积分」活动（WorkBuddy 每日 100 分、Trae 每日 200 分、MiniMax Code 每日 400 分、百度搭子每日 500 分、TeleAgent 每日 100 分），手动签到容易忘、积分会浪费。本项目读取各桌面端**本机已有的登录凭据**，直接调用官方签到接口完成领取——不开 GUI、不模拟点击、不需要客户端保持运行。
 
-> 💡 **项目缘起**：WorkBuddy 端的积分领取方案（凭据定位 + 接口协议）来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的启发，在此致谢；Trae、MiniMax Code 与百度搭子端为本项目独立逆向实现。
+> 💡 **项目缘起**：WorkBuddy 端的积分领取方案（凭据定位 + 接口协议）来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的启发，在此致谢；Trae、MiniMax Code、百度搭子与 TeleAgent 端为本项目独立逆向实现。
 
 **About 建议文案（GitHub 仓库描述）：**
 
 ```
-WorkBuddy / Trae / MiniMax Code / 百度搭子 四端每日签到自动领取脚本：纯接口实现、幂等安全，支持集成到 WorkBuddy 自动化、任意 Agent Skill 或系统 crontab。
+WorkBuddy / Trae / MiniMax Code / 百度搭子 / TeleAgent 五端每日签到自动领取脚本：纯接口实现、幂等安全，支持集成到 WorkBuddy 自动化、任意 Agent Skill 或系统 crontab。
 ```
 
-Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `minimax` `dumate` `python`
+Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `minimax` `dumate` `teleagent` `python`
 
 ## 支持的平台
 
@@ -25,6 +25,7 @@ Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `mini
 | Trae CN（原 SOLO CN） | 200 积分 | `storage.json` 加密登录态（AES-128-CBC 本地解密） | `api.trae.cn/.../checkin_credits/{status,claim}` | `trae_signin.py` |
 | MiniMax Code | 400 积分（连签第 4/7 天 1000） | 新版（≥2026-10-19）：`~/.minimax/auth/<env>/<region>/mcode-public/auth.json` 的 OAuth token（`mmoat_` 前缀）；旧版回退 webview leveldb JWT | `agent.minimax.cn/.../signin/{status,claim}` | `minimax_signin.py` |
 | 百度搭子 DuMate | 500 积分 | `auth.json` 加密 Cookie（AES-256-GCM 本地解密） | `console.bce.baidu.com/api/dumate/points/{loginBonusInfo,loginBonus}` | `dumate_signin.py` |
+| TeleAgent（星辰超级智能体） | 100 积分 | `app-auth/token.json` 的 Electron safeStorage 密文（keychain 口令 + AES-128-CBC 本地解密）；失败时回退 `Partitions/*/Local Storage/leveldb` 提取 | `agent.teleai.com.cn/superCowork/sapi/user/portal/companyStore/{v2/checkDayTask,checkTask?type=daily_login}` | `teleagent_signin.py` |
 
 ### 客户端版本相关注意事项
 
@@ -41,12 +42,21 @@ Topics 建议：`automation` `checkin` `signin` `agent` `workbuddy` `trae` `mini
   脚本已适配新版，并支持 `minimax_signin.py login`（device flow + PKCE）重新授权。
   ⚠️ refresh token 是**轮换制**，服务端每次刷新都换发新 token、旧 token 立即作废，
   脚本刷新后必须原子写回 `auth.json`，切勿"只调 refresh 不写回"（会导致客户端自登出）。
+- **TeleAgent 的凭据目录是 `~/.local/share/TeleAgent`**（不是 `Application Support`，后者是空壳）。
+  主路读 `users/<userHash>/app-auth/token.json`，用 Electron safeStorage 的方式解密
+  （macOS：keychain 条目 `TeleAgent Safe Storage` → PBKDF2-HMAC-SHA1(pw, "saltysalt", 1003, 16B)
+  → AES-128-CBC，IV 为 16 个空格；Windows 走 DPAPI；Linux v11 用固定口令 `peanuts`）。
+  主路失败（例如凌晨定时任务时屏幕锁定、keychain 不可访问）会自动回退到 leveldb 目录用 `strings`
+  提取候选 token 并逐个试探——leveldb 里会残留**已过期**的历史 token，所以必须试探而非直接使用。
+- **TeleAgent 的领取接口是「静默幂等」的**：今日已领时 `checkTask` 仍返回
+  `{"code":200,"msg":"success","data":[]}`，**没有任何错误码**。因此脚本以「领取后重查
+  `v2/checkDayTask` 的 `claimed_today` 是否翻转」为唯一成功判据，无证据不报 CLAIMED。
 
 
 ## 快速开始
 
 ```bash
-# 四端全部执行（推荐，幂等可重复跑）
+# 五端全部执行（推荐，幂等可重复跑）
 python3 scripts/run_all.py
 
 # 只跑某一端
@@ -54,15 +64,17 @@ python3 scripts/workbuddy_signin.py auto
 python3 scripts/trae_signin.py auto
 python3 scripts/minimax_signin.py auto
 python3 scripts/dumate_signin.py auto
+python3 scripts/teleagent_signin.py auto
 
 # 调试子命令
 python3 scripts/workbuddy_signin.py status   # 只查状态
 python3 scripts/trae_signin.py status
 python3 scripts/minimax_signin.py status
 python3 scripts/dumate_signin.py status
+python3 scripts/teleagent_signin.py status
 ```
 
-环境要求：Python 3.8+；Trae 解密用到 `openssl` 命令行（macOS/Linux 自带）；百度搭子解密需要 `pip install cryptography`，其余脚本零依赖。
+环境要求：Python 3.8+；Trae 与 TeleAgent 解密用到 `openssl` 命令行（macOS/Linux 自带）；TeleAgent 的 leveldb 回退路径用到 `strings`（同样自带）；百度搭子解密需要 `pip install cryptography`，其余脚本零依赖。
 
 ## 输出契约（供 Agent / 程序解析）
 
@@ -85,6 +97,30 @@ python3 scripts/dumate_signin.py status
 | `ERROR` / `UNKNOWN` | 接口或脚本异常 | 是 |
 
 退出码：`0` 正常（含 ALREADY）、`1` 硬失败、`2` 用法/凭据错误。**任何情况下脚本都不会打印 token。**
+
+## 常见问题：TeleAgent 报 `NO_SESSION` / `NO_AUTH`
+
+TeleAgent 的登录态由主进程用 Electron safeStorage 加密存两份（互为补充）：
+
+```
+~/.local/share/TeleAgent/users/<userHash>/app-auth/token.json   # 主路：权威密文
+~/.local/share/TeleAgent/Partitions/*/Local Storage/leveldb     # 备路：渲染进程历史残留
+```
+
+脚本先解 `token.json`（keychain/DPAPI + AES），解不出来才回退用 `strings` 从 leveldb 抓候选 token
+并逐个试探。鉴权只需要一个 `X-Token` 头（逆向自客户端 request 层 `e1()`）；其余 `X-Timestamp` /
+`X-Nonce` / `X-Device-Id` / `X-App-Version` 服务端实测均为可选，无签名、无 CSRF。
+因此**不依赖客户端运行、不依赖设备号**。
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| `NO_AUTH` 且提示 keychain/openssl | 屏幕锁定或钥匙串未解锁，`security` 取不到口令；解锁后重跑，或依赖 leveldb 回退 |
+| `NO_SESSION` | 本地 token 已失效：重新登录一次 TeleAgent 桌面端即可 |
+| `ERROR ... 复核未看到 claimed_today 变化` | 领取请求已受理但状态未翻转（服务端延迟/被拦截），稍后跑 `status` 确认 |
+
+> 社区常见的 TeleAgent 方案是 Windows 上的 uiautomation 模拟点击（账户菜单 → 积分福利社 → 立即领取），
+> 踩坑极多（Electron 拦截 `mouse_event`、模糊匹配误点侧边栏同名任务、点完菜单关闭需重开验证、
+> PowerShell GBK 乱码、多进程取错窗口）。本项目改为接口直调，上述问题全部不存在。
 
 ## 常见问题：MiniMax Code 报 `NO_SESSION` / `NO_AUTH`
 
@@ -136,6 +172,7 @@ token 写回文件**，与服务端的 refresh token 轮换机制兼容，因此
 - **[88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)**：本项目灵感与 WorkBuddy 端方案的直接来源（凭据文件定位、签到/成长中心接口协议均参考该实现，并在此基础上做了沙箱兼容、时间预算、退出码分级等加固）。
 - Trae 登录态解密方案与 Trae 论坛社区公开实现交叉验证。
 - 百度搭子端协议（Cookie 加密布局、csrftoken 鉴权）为本项目独立逆向自 DuMate 客户端。
+- TeleAgent 端协议（积分福利社签到/领取接口、`X-Token` 鉴权、safeStorage 凭据布局）为独立逆向自 TeleAgent 客户端。
 
 ## License
 

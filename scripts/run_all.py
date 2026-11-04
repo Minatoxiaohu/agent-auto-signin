@@ -1,10 +1,13 @@
-"""agent-auto-signin 统一入口：依次执行三端签到，汇总输出。
+"""agent-auto-signin 统一入口：依次执行各端签到，汇总输出。
 
 用法：
-  python run_all.py            # 三端全部执行（auto 模式，幂等）
+  python run_all.py            # 全部五端执行（auto 模式，幂等）
   python run_all.py workbuddy  # 只跑 WorkBuddy
   python run_all.py trae       # 只跑 Trae
   python run_all.py minimax    # 只跑 MiniMax Code
+  python run_all.py dumate     # 只跑 百度搭子 DuMate
+  python run_all.py teleagent  # 只跑 TeleAgent
+  python run_all.py teleagent dumate   # 也可以只跑指定的几端
 
 输出：每个目标一行 JSON（与单脚本输出契约一致），最后多打一行汇总 JSON
 （带 "summary": true 标记，方便调用方按行解析时过滤）。
@@ -22,6 +25,7 @@ SCRIPTS = {
     "trae": "trae_signin.py",
     "minimax": "minimax_signin.py",
     "dumate": "dumate_signin.py",
+    "teleagent": "teleagent_signin.py",
 }
 
 # 这些 result 视为"需要人关注"的失败
