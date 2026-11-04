@@ -93,12 +93,13 @@ launchd 的 `ExecutionTimeLimit` 默认 10 分钟会强杀进程；WorkBuddy 端
 | `MINIMAX_OAUTH_AUTH_FILE` | 指向 MiniMax 新版 OAuth 凭据 `auth.json`（默认自动探测 `~/.minimax/auth/*/*/*/auth.json`） |
 | `MINIMAX_DESKTOP_VERSION` | MiniMax 桌面端版本号（默认 3.1.6，仅影响风控头，可按客户端实际版本覆盖） |
 | `DUMATE_AUTH_DIR` | 指向 DuMate 数据目录（含 `auth.json` 与 `.cookie-key`） |
+| `TELEAGENT_USER_DATA` | 指向 TeleAgent 的 Electron userData 目录（默认 `~/.local/share/TeleAgent`） |
 | `WORKBUDDY_SIGNIN_LOG` | silent 模式日志路径 |
 | `WORKBUDDY_BUDGET_SECONDS` | WorkBuddy 端运行时间预算（默认 420s） |
 
 ## 安全须知
 
-> **依赖说明**：百度搭子（DuMate）端需要 `pip install cryptography`（AES-GCM 解密）；WorkBuddy / Trae / MiniMax 三端零第三方依赖（Trae 用系统自带 `openssl`）。
+> **依赖说明**：百度搭子（DuMate）端需要 `pip install cryptography`（AES-GCM 解密）；WorkBuddy / Trae / MiniMax / TeleAgent 四端零第三方依赖（Trae 用系统自带 `openssl`，TeleAgent 用系统自带 `strings`）。
 
 - 脚本只**读取**本机凭据，不写入、不上传、不打印。
 - 把日志文件（`signin.log`）加入 `.gitignore`，避免把含积分/账号信息的运行记录提交进仓库。
